@@ -6,13 +6,15 @@ from dataclasses import dataclass
 '''
 T0D0$
 TODO: Apply KV Cache?
+TODO: Add dropout regging later.
 '''
 @dataclass
 class GPTConfig:
     seq_len: int = 8
     embedding_len = 32
     n_heads = 8
-    n_blocks = 0
+    n_blocks = 12
+    vocab_size = 50
 
 class SelfAttention(nn.Module):
     
@@ -73,8 +75,38 @@ class FeedForward(nn.Module):
         x = self.gelu(x) # > (B, T, C * 4)
         x = self.lin2(x) # > (B,T,C)
         return x
-    
 
+class Block(nn.Module):
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(config.embedding_len)
+        self.attn = SelfAttention(config)
+        self.ln_2 = nn.LayerNorm(config.embedding_len)
+        self.feed_fw = FeedForward(config)
+    
+    def forward(self, x):
+        '''
+        input: (B, T, C)
+        output: (B, T, C)
+        '''
+        x = self.ln_1(x)
+        x = x + self.attn(x)
+        x = self.ln_2(x)
+        x = x + self.feed_fw(x)
+        return x
+
+class GPT(nn.Module):
+
+    def __init__(self, config:GPTConfig):
+        super().__init__()
+        self.transformer = nn.ModuleDict(dict(
+            embedding_table = nn.Embedding(config.vocab_size, config.embedding_len),
+            positional_embedding = nn.Embedding(config.seq_len, config.embedding_len),
+            blocks = nn.ModuleList([Block(config) for _ in range(config.n_blocks)]), 
+            ln = nn.LayerNorm()
+        ))
+        
 '''
 Some notes:
 
@@ -91,3 +123,6 @@ x = torch.rand(4, conf.seq_len, conf.embedding_len)
 out = s_attn(x)
 feed_fw = FeedForward(conf)
 out = feed_fw(out)
+
+block = Block(conf)
+out = block(x)
