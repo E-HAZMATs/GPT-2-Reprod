@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 
+'''
+T0D0$
+TODO: Apply KV Cache?
+'''
 @dataclass
 class GPTConfig:
     seq_len: int = 8
@@ -22,7 +26,7 @@ class SelfAttention(nn.Module):
         self.qkv_lin = nn.Linear(config.embedding_len, config.embedding_len * 3)
         self.proj_lin = nn.Linear(config.embedding_len, config.embedding_len)
 
-        # Add stencil here? better with register buffer so it's no grad
+        # TODO: Add stencil/mask here? better with register buffer so it's no grad
 
     def forward(self, x):
         # rough steps: get QKV > matmul q with k > get mask > apply mask > softmax 
@@ -36,15 +40,22 @@ class SelfAttention(nn.Module):
         
         # Pre process for multihead attn. 
         # For each example, for each head, for each timestep we have headsize result
-        q = q.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2) # (B, n_heads, T, head_size) 
+        q = q.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2) # (B, n_heads, T, head_size). Before (B, T, C). 
         k = k.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2)
         v = v.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2)
-        # (B, n_heads, T, head_size) @ (B, n_heads, head_size, T) = (B, n_heads, T, T)?
+        # (B, n_heads, T, head_size) @ (B, n_heads, head_size, T) = (B, n_heads, T, T)
         wei = q @ k.transpose(-1, -2)
-        with torch.no_grad():
+        with torch.no_grad(): # actually useful here?
+            # Move to constructor?
             tril = torch.tril(torch.ones(T,T))
             wei = wei.masked_fill(tril == 0, float('-inf'))
-            print('hi')
+            # Each vector at last dim, should sum to 1.
+            affinity = F.softmax(wei, dim=-1)
+        attention = affinity  @ v
+        # `contiguous` sorta applies the transposition in memory. Otherwise the `view` will fail
+        attention = attention.transpose(1,2).contiguous().view(B,T,C)
+        out = self.proj_lin(attention)
+        return out
 
 conf = GPTConfig()
 print(conf.seq_len)
