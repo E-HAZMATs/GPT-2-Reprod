@@ -43,7 +43,7 @@ class SelfAttention(nn.Module):
         v = v.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2)
         # (B, n_heads, T, head_size) @ (B, n_heads, head_size, T) = (B, n_heads, T, T)
         wei = q @ k.transpose(-1, -2)
-        # XXX: Move to constructor?
+        # XXX: Constant. Move to constructor?
         tril = torch.tril(torch.ones(T,T))
         wei = wei.masked_fill(tril == 0, float('-inf'))
         # Each vector at last dim, should sum to 1.
@@ -68,11 +68,26 @@ class FeedForward(nn.Module):
         # DON'T FORGET ABOUT RES CONS.
         # in transformer diagram the output of this layer is added to residual pathway.
         # but gpt does things different, so...?
-        x = self.lin1(x)
+        # whole layer is a single residual block? so the addition is in the Atten+FeedFW block?
+        x = self.lin1(x) # > (B, T, C * 4)
+        x = self.gelu(x) # > (B, T, C * 4)
+        x = self.lin2(x) # > (B,T,C)
+        return x
     
+
+'''
+Some notes:
+
+- GPT, differs than the transformer.png. It's a decoder-only transformer.
+the LN is done I think before the attention adn FW instead of after shown in the diagram.
+- attn and FW are each a residual block. their output to residual pathway.
+
+'''
 
 conf = GPTConfig()
 print(conf.seq_len)
 s_attn = SelfAttention(conf)
 x = torch.rand(4, conf.seq_len, conf.embedding_len)
 out = s_attn(x)
+feed_fw = FeedForward(conf)
+out = feed_fw(out)
