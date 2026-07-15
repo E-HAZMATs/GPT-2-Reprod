@@ -30,10 +30,8 @@ class SelfAttention(nn.Module):
 
     def forward(self, x):
         # rough steps: get QKV > matmul q with k > get mask > apply mask > softmax 
-        # > matmul softmax result (wei) with V -> project? (or is that done before?) 
+        # > matmul softmax result (wei) with V -> project.
         B, T, C = x.size() 
-        # XXX: Would C being smaller than embed_len cause compatibility issue with n_heads?
-        # NO!!! C disappears after linear matmul. But wouldn't it prevent matmul cus of mismatch? (B,C) @ (n_emb, n_emb) if C != n_emb > crash
         assert C <= self.config.embedding_len, "wtf?" 
         qkv = self.qkv_lin(x) # B T EMBED_LEN*3
         q, k, v = qkv.split(self.config.embedding_len, -1) # split over emb dim
@@ -45,17 +43,33 @@ class SelfAttention(nn.Module):
         v = v.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2)
         # (B, n_heads, T, head_size) @ (B, n_heads, head_size, T) = (B, n_heads, T, T)
         wei = q @ k.transpose(-1, -2)
-        with torch.no_grad(): # actually useful here?
-            # Move to constructor?
-            tril = torch.tril(torch.ones(T,T))
-            wei = wei.masked_fill(tril == 0, float('-inf'))
-            # Each vector at last dim, should sum to 1.
-            affinity = F.softmax(wei, dim=-1)
+        # XXX: Move to constructor?
+        tril = torch.tril(torch.ones(T,T))
+        wei = wei.masked_fill(tril == 0, float('-inf'))
+        # Each vector at last dim, should sum to 1.
+        affinity = F.softmax(wei, dim=-1)
         attention = affinity  @ v
         # `contiguous` sorta applies the transposition in memory. Otherwise the `view` will fail
         attention = attention.transpose(1,2).contiguous().view(B,T,C)
+        # This makes each head result PER TOKEN communicate/concat.
         out = self.proj_lin(attention)
         return out
+
+class FeedForward(nn.Module):
+    
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        g_approx = 'none' # or 'tanh'.  altho, gelu was solved in newer pytorch? 
+        self.lin1 = nn.Linear(config.embedding_len, config.embedding_len * 4)
+        self.gelu = nn.GELU(approximate=g_approx)
+        self.lin2 = nn.Linear(config.embedding_len * 4, config.embedding_len)
+
+    def forward(self, x):
+        # DON'T FORGET ABOUT RES CONS.
+        # in transformer diagram the output of this layer is added to residual pathway.
+        # but gpt does things different, so...?
+        x = self.lin1(x)
+    
 
 conf = GPTConfig()
 print(conf.seq_len)
