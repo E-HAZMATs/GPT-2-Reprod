@@ -130,12 +130,16 @@ class GPT(nn.Module):
         x = self.transformer.ln(x)
         logits = self.linear_final(x)
         # If eval, we're only cconcerned with next token for last time step.
-        logits = logits if not self.training else logits[:,[-1], :] # [-1] brackets preserve dim. 
+        logits = logits if self.training else logits[:,[-1], :] # [-1] brackets preserve dim. 
         
         # Softmax over last dim (vocab_size) to get the probas for next token for each token in vocab
         probas = F.softmax(logits, dim=-1)
         vals, indices = probas.topk(self.top_picks, dim=-1)
-        
+        # FIXME: Using T will fail for when training = false.
+        idx = vals.view(B * T, self.top_picks).multinomial(1)
+        idx = idx.view(B, T, 1) 
+        tokens = indices.gather(-1, idx)
+        print('')
 
 '''
 Some notes:
