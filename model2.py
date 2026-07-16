@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-
+import tiktoken
 '''
 T0D0$
 TODO: Apply KV Cache?
@@ -143,6 +143,27 @@ class GPT(nn.Module):
         idx = idx.view(B, T, 1) 
         tokens = indices.gather(-1, idx)
 
+class DataLoader:
+
+    def __init__(self, data, context_window=10):
+        # Open dataset or sommin'
+        self.context_window = context_window
+        self.data = data
+        self.n = len(self.data)
+        self.capacity = self.n // self.context_window
+
+    def construct(self, i):
+        if i > self.capacity:
+            i = i % self.capacity 
+        start = self.context_window * i
+        end = start + self.context_window
+        # FIXME: Make sure no out of bound indexing happens. But don't waste data
+        if (start+ self.context_window) >= self.n:
+            pass
+        x = self.data[start: end]
+        y = self.data[start+1: end+1]
+        return x,y
+    
 '''
 Some notes:
 
@@ -156,25 +177,30 @@ the LN is done I think before the attention adn FW instead of after shown in the
 #  ARGS
 batch_size = 4
 training = False
-iter = 20
+iter = int(1e4)
+conf = GPTConfig()
+context_window = 100
 # =====
 
-conf = GPTConfig()
-print(conf.seq_len)
-# s_attn = SelfAttention(conf)
-# x = torch.rand(4, conf.seq_len, conf.embedding_len)
-# out = s_attn(x)
-# feed_fw = FeedForward(conf)
-# out = feed_fw(out)
+#=== Data Loading Test ===
+with open('input.txt', 'r') as f:
+    text = f.read()
 
-# block = Block(conf)
-# out = block(x)
+tokenizer = tiktoken.get_encoding('gpt2')
+tokenized_data = tokenizer.encode(text)
+dataload = DataLoader(tokenized_data, context_window)
+for i in range(iter):
+    dataload.construct(i)
+# ===
 
-sequences = torch.randint(0, conf.vocab_size, (4, conf.seq_len - 3))
-gpt = GPT(conf)
-if not training:
-    gpt.eval()
-out = gpt(sequences)
+
+
+
+# sequences = torch.randint(0, conf.vocab_size, (4, conf.seq_len - 3))
+# gpt = GPT(conf)
+# if not training:
+#     gpt.eval()
+# out = gpt(sequences)
 
 
 # === Training ===
