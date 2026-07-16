@@ -130,16 +130,18 @@ class GPT(nn.Module):
         x = self.transformer.ln(x)
         logits = self.linear_final(x)
         # If eval, we're only cconcerned with next token for last time step.
-        logits = logits if self.training else logits[:,[-1], :] # [-1] brackets preserve dim. 
-        
+        if not self.training:
+            # XXX: Should time step dim be dropped?
+            logits = logits[:,[-1], :] # [-1] brackets preserve dim. 
+            T = 1 # For shaping multinomial
         # Softmax over last dim (vocab_size) to get the probas for next token for each token in vocab
         probas = F.softmax(logits, dim=-1)
+
+        # XXX: Need no_grad ctx?
         vals, indices = probas.topk(self.top_picks, dim=-1)
-        # FIXME: Using T will fail for when training = false.
         idx = vals.view(B * T, self.top_picks).multinomial(1)
         idx = idx.view(B, T, 1) 
         tokens = indices.gather(-1, idx)
-        print('')
 
 '''
 Some notes:
@@ -153,7 +155,8 @@ the LN is done I think before the attention adn FW instead of after shown in the
 # =====
 #  ARGS
 batch_size = 4
-
+training = False
+iter = 20
 # =====
 
 conf = GPTConfig()
@@ -169,4 +172,17 @@ print(conf.seq_len)
 
 sequences = torch.randint(0, conf.vocab_size, (4, conf.seq_len - 3))
 gpt = GPT(conf)
+if not training:
+    gpt.eval()
 out = gpt(sequences)
+
+
+# === Training ===
+'''
+    General Notes
+- Try running multiple epochs. Each epoch have the dataset permuatated somehow?
+- apply warmup, lr decay.
+- Grad scaling? 
+'''
+for i in range(iter):
+    pass
