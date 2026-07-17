@@ -114,7 +114,7 @@ class GPT(nn.Module):
         self.linear_final = nn.Linear(config.embedding_len, config.vocab_size) # (B, T, vocab_size)
     
     # Recieves B sequences of T tokens. (B, T).
-    def forward(self, x):
+    def forward(self, x, y=None):
         '''
         TODO: Add block for when in inference and we're only concerned with next token of last timestep.
         '''
@@ -142,24 +142,33 @@ class GPT(nn.Module):
         idx = vals.view(B * T, self.top_picks).multinomial(1)
         idx = idx.view(B, T, 1) 
         tokens = indices.gather(-1, idx)
-
+        return tokens
 class DataLoader:
-
+    '''
+    TODO: train/eval sets? Need to find a good split ("good numbers").
+    '''
     def __init__(self, data, context_window=10):
-        # Open dataset or sommin'
         self.context_window = context_window
         self.data = data
         self.n = len(self.data)
-        self.capacity = self.n // self.context_window
+        self.capacity = (self.n // self.context_window) - 1 
+        # self.n = 100
 
     def construct(self, i):
         if i > self.capacity:
-            i = i % self.capacity 
+            # Added 1 so capacity + 1 gives us 0 instead of zeroing at capacity.
+            # Maybe scuffed?
+            i = i % (self.capacity + 1) 
+            
         start = self.context_window * i
         end = start + self.context_window
         # FIXME: Make sure no out of bound indexing happens. But don't waste data
-        if (start+ self.context_window) >= self.n:
-            pass
+        # Fixed?
+        if end >= self.n:
+            # Scuffed solution. We repeat some tokens in an epoch.
+            start = self.n - self.context_window - 1
+            end = self.n - 1
+        
         x = self.data[start: end]
         y = self.data[start+1: end+1]
         return x,y
@@ -173,42 +182,43 @@ the LN is done I think before the attention adn FW instead of after shown in the
 
 '''
 
-# =====
-#  ARGS
+# region ARGS
 batch_size = 4
-training = False
+training = True
 iter = int(1e4)
 conf = GPTConfig()
-context_window = 100
-# =====
+context_window = 10
+lr = 1e-3
+# endregion
 
-#=== Data Loading Test ===
+# region dataloading test
 with open('input.txt', 'r') as f:
     text = f.read()
 
 tokenizer = tiktoken.get_encoding('gpt2')
 tokenized_data = tokenizer.encode(text)
 dataload = DataLoader(tokenized_data, context_window)
-for i in range(iter):
-    dataload.construct(i)
-# ===
+# for i in range(iter):
+#     dataload.construct(i)
+# endregion
 
-
-
-
-# sequences = torch.randint(0, conf.vocab_size, (4, conf.seq_len - 3))
-# gpt = GPT(conf)
-# if not training:
-#     gpt.eval()
-# out = gpt(sequences)
-
-
-# === Training ===
+# region Training 
 '''
     General Notes
 - Try running multiple epochs. Each epoch have the dataset permuatated somehow?
 - apply warmup, lr decay.
 - Grad scaling? 
 '''
-for i in range(iter):
+sequences = torch.randint(0, conf.vocab_size, (4, conf.seq_len - 3))
+gpt = GPT(conf)
+if not training:
+    gpt.eval()
+out = gpt(sequences)
+param_count = sum([p.numel() for p in gpt.parameters() if p.requires_grad])
+print(f'Param count: {param_count}')
+optim = torch.optim.Adam(gpt.parameters(), lr)
+
+for i in range(50):
     pass
+
+# endregion
