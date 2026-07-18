@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 import tiktoken
+import numpy as np
 '''
 T0D0$
 TODO: Apply KV Cache?
@@ -10,11 +11,11 @@ TODO: Add dropout regging later.
 '''
 @dataclass
 class GPTConfig:
-    seq_len: int = 8
+    seq_len: int = 64
     embedding_len = 32
     n_heads = 8
     n_blocks = 12
-    vocab_size = 50
+    vocab_size = 50257
 
 class SelfAttention(nn.Module):
     
@@ -134,6 +135,10 @@ class GPT(nn.Module):
             # XXX: Should time step dim be dropped?
             logits = logits[:,[-1], :] # [-1] brackets preserve dim. 
             T = 1 # For shaping multinomial
+        if self.training and y is not None:
+            # Pytoch CE expects logits not probas. 
+            # And it expects them to be B C T instead of B T C.
+            loss = F.cross_entropy(logits.transpose(-1, -2), y)
         # Softmax over last dim (vocab_size) to get the probas for next token for each token in vocab
         probas = F.softmax(logits, dim=-1)
 
@@ -142,36 +147,52 @@ class GPT(nn.Module):
         idx = vals.view(B * T, self.top_picks).multinomial(1)
         idx = idx.view(B, T, 1) 
         tokens = indices.gather(-1, idx)
-        return tokens
+        return tokens, loss
 class DataLoader:
     '''
     TODO: train/eval sets? Need to find a good split ("good numbers").
     '''
-    def __init__(self, data, context_window=10):
+    def __init__(self, data, batch_size, context_window=10 ):
         self.context_window = context_window
+        self.batch_size = batch_size
         self.data = data
         self.n = len(self.data)
+        self.last_stop = 0
         self.capacity = (self.n // self.context_window) - 1 
-        # self.n = 100
-
-    def construct(self, i):
-        if i > self.capacity:
-            # Added 1 so capacity + 1 gives us 0 instead of zeroing at capacity.
-            # Maybe scuffed?
-            i = i % (self.capacity + 1) 
+    
+    def construct_batch(self, i):
+        x_batch = []
+        y_batch = []
+        for j in range(batch_size):
+            end = self.last_stop + self.context_window
+            x_batch.append(torch.tensor(self.data[self.last_stop: end], dtype=torch.int32))
+            y_batch.append(torch.tensor(self.data[self.last_stop+1: end+1], dtype=torch.long)) # F.cross_ent expects type long for targets
+            self.last_stop = end
+        x = torch.stack(x_batch)
+        y = torch.stack(y_batch)
+        return x, y
+    # def construct_batch(self, i):
+    #     '''
+    #     This is supposed to construct a whole mini batch. Not a single example!!!
+    #     XXX: Incompatible with how forward expects shape.
+    #     '''
+    #     if i > self.capacity:
+    #         # Added 1 so capacity + 1 gives us 0 instead of zeroing at capacity.
+    #         # Maybe scuffed?
+    #         i = i % (self.capacity + 1) 
             
-        start = self.context_window * i
-        end = start + self.context_window
-        # FIXME: Make sure no out of bound indexing happens. But don't waste data
-        # Fixed?
-        if end >= self.n:
-            # Scuffed solution. We repeat some tokens in an epoch.
-            start = self.n - self.context_window - 1
-            end = self.n - 1
+    #     start = self.context_window * i
+    #     end = start + self.context_window
+    #     # FIXME: Make sure no out of bound indexing happens. But don't waste data
+    #     # Fixed?
+    #     if end >= self.n:
+    #         # Scuffed solution. We repeat some tokens in an epoch.
+    #         start = self.n - self.context_window - 1
+    #         end = self.n - 1
         
-        x = self.data[start: end]
-        y = self.data[start+1: end+1]
-        return x,y
+    #     x = self.data[start: end]
+    #     y = self.data[start+1: end+1]
+    #     return x,y
     
 '''
 Some notes:
@@ -182,24 +203,29 @@ the LN is done I think before the attention adn FW instead of after shown in the
 
 '''
 
-# region ARGS
-batch_size = 4
-training = True
-iter = int(1e4)
-conf = GPTConfig()
-context_window = 10
-lr = 1e-3
-# endregion
-
-# region dataloading test
+# region ARGS - Objects
 with open('input.txt', 'r') as f:
     text = f.read()
 
 tokenizer = tiktoken.get_encoding('gpt2')
 tokenized_data = tokenizer.encode(text)
-dataload = DataLoader(tokenized_data, context_window)
+token_count = len(tokenized_data)
+data = np.array(tokenized_data, dtype=np.uint16) # Vocab 50k, dtype max ~ 60k
+del tokenized_data
+
+conf = GPTConfig()
+batch_size = 32
+context_window = conf.seq_len
+batches_count = token_count // (batch_size * context_window + 1) # How many batches per epoch. XXX: Some data loss probably happens, minor.
+training = True
+iter = int(1e4)
+lr = 1e-3
+# endregion
+
+# region dataloading test
+dataloader = DataLoader(data, batch_size, context_window)
 # for i in range(iter):
-#     dataload.construct(i)
+#     dataloader.construct(i)
 # endregion
 
 # region Training 
@@ -209,16 +235,23 @@ dataload = DataLoader(tokenized_data, context_window)
 - apply warmup, lr decay.
 - Grad scaling? 
 '''
-sequences = torch.randint(0, conf.vocab_size, (4, conf.seq_len - 3))
+# sequences = torch.randint(0, conf.vocab_size, (4, conf.seq_len - 3))
+# x, y = dataloader.construct_batch(0)
 gpt = GPT(conf)
 if not training:
     gpt.eval()
-out = gpt(sequences)
+# out = gpt(x, y)
 param_count = sum([p.numel() for p in gpt.parameters() if p.requires_grad])
 print(f'Param count: {param_count}')
+print(batches_count)
 optim = torch.optim.Adam(gpt.parameters(), lr)
 
-for i in range(50):
-    pass
+for i in range(batches_count):
+    x, y = dataloader.construct_batch(i)
+    tokens, loss = gpt(x,y)
+    print(f'loss: {loss}')
+    loss.backward()
+    optim.step()
+    optim.zero_grad()
 
 # endregion
