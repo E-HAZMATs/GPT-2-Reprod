@@ -105,7 +105,7 @@ class GPT(nn.Module):
         '''
         super().__init__()
         self.config = config
-        self.top_picks = 5 # Arg for torch.topk
+        self.top_picks = 25 # Arg for torch.topk
         self.transformer = nn.ModuleDict(dict(
             embedding_table = nn.Embedding(config.vocab_size, config.embedding_len),
             positional_embedding = nn.Embedding(config.seq_len, config.embedding_len),
@@ -139,20 +139,24 @@ class GPT(nn.Module):
             # Pytoch CE expects logits not probas. 
             # And it expects them to be B C T instead of B T C.
             loss = F.cross_entropy(logits.transpose(-1, -2), y)
-        # Softmax over last dim (vocab_size) to get the probas for next token for each token in vocab
-        probas = F.softmax(logits, dim=-1)
+        tokens = None
+        if not self.training:
+            # Sampling logic not needed during training
+            
+            # Softmax over last dim (vocab_size) to get the probas for next token for each token in vocab
+            probas = F.softmax(logits, dim=-1)
 
-        # XXX: Need no_grad ctx?
-        vals, indices = probas.topk(self.top_picks, dim=-1)
-        idx = vals.view(B * T, self.top_picks).multinomial(1)
-        idx = idx.view(B, T, 1) 
-        tokens = indices.gather(-1, idx)
+            # XXX: Need no_grad ctx?
+            vals, indices = probas.topk(self.top_picks, dim=-1)
+            idx = vals.view(B * T, self.top_picks).multinomial(1)
+            idx = idx.view(B, T, 1) 
+            tokens = indices.gather(-1, idx)
         return tokens, loss
 class DataLoader:
     '''
     TODO: train/eval sets? Need to find a good split ("good numbers").
     '''
-    def __init__(self, data, batch_size, context_window=10 ):
+    def __init__(self, data, batch_size, context_window):
         self.context_window = context_window
         self.batch_size = batch_size
         self.data = data
@@ -171,28 +175,6 @@ class DataLoader:
         x = torch.stack(x_batch)
         y = torch.stack(y_batch)
         return x, y
-    # def construct_batch(self, i):
-    #     '''
-    #     This is supposed to construct a whole mini batch. Not a single example!!!
-    #     XXX: Incompatible with how forward expects shape.
-    #     '''
-    #     if i > self.capacity:
-    #         # Added 1 so capacity + 1 gives us 0 instead of zeroing at capacity.
-    #         # Maybe scuffed?
-    #         i = i % (self.capacity + 1) 
-            
-    #     start = self.context_window * i
-    #     end = start + self.context_window
-    #     # FIXME: Make sure no out of bound indexing happens. But don't waste data
-    #     # Fixed?
-    #     if end >= self.n:
-    #         # Scuffed solution. We repeat some tokens in an epoch.
-    #         start = self.n - self.context_window - 1
-    #         end = self.n - 1
-        
-    #     x = self.data[start: end]
-    #     y = self.data[start+1: end+1]
-    #     return x,y
     
 '''
 Some notes:
@@ -245,13 +227,14 @@ param_count = sum([p.numel() for p in gpt.parameters() if p.requires_grad])
 print(f'Param count: {param_count}')
 print(batches_count)
 optim = torch.optim.Adam(gpt.parameters(), lr)
-
-for i in range(batches_count):
-    x, y = dataloader.construct_batch(i)
-    tokens, loss = gpt(x,y)
-    print(f'loss: {loss}')
-    loss.backward()
-    optim.step()
-    optim.zero_grad()
+for epoch in range(4):
+    dataloader.last_stop = 0
+    for i in range(batches_count):
+        x, y = dataloader.construct_batch(i)
+        tokens, loss = gpt(x,y)
+        print(f'loss: {loss}')
+        loss.backward()
+        optim.step()
+        optim.zero_grad()
 
 # endregion
