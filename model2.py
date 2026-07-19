@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 import tiktoken
 import numpy as np
+from helpers import save_ckpt
 '''
 T0D0$
 TODO: Apply KV Cache?
@@ -113,7 +114,11 @@ class GPT(nn.Module):
             ln = nn.LayerNorm(config.embedding_len)
         ))
         self.linear_final = nn.Linear(config.embedding_len, config.vocab_size) # (B, T, vocab_size)
-    
+
+        # EMBEDDING AND OUTPUT LAYER WEIGHT TYING
+        # Both weights have same shape btw.  
+        self.transformer.embedding_table.weight = self.linear_final.weight
+
     # Recieves B sequences of T tokens. (B, T).
     def forward(self, x, y=None):
         '''
@@ -121,11 +126,11 @@ class GPT(nn.Module):
         '''
         B, T= x.size()
         assert T <= self.config.seq_len, f'sequence length should not exceed {self.config.seq_len}' # XXX: Should ==? otherwise mismatch with linear
-        token_embeddings = self.transformer['embedding_table'](x) # (B, T, C)
+        token_embeddings = self.transformer.embedding_table(x) # (B, T, C)
         positions = torch.arange(0, T) # Should use actual T sequence length from input instead of config. Otherwise, boarding in addition fails.
-        pos_embeddings = self.transformer['positional_embedding'](positions) # (seq_len)
+        pos_embeddings = self.transformer.positional_embedding(positions) # (seq_len)
         x = token_embeddings + pos_embeddings
-        for block in self.transformer['blocks']:
+        for block in self.transformer.blocks:
             x = block(x)
 
         x = self.transformer.ln(x)
@@ -236,6 +241,7 @@ iter = int(1e4)
 lr = 1e-3
 weight_decay = 1e-3
 eval_every = 20
+warmup = 500
 # endregion
 
 # region dataloading test
@@ -269,6 +275,7 @@ for epoch in range(4):
         if round % eval_every == 0 and round != 0:
             print('***EVALUATION***')
             gpt.eval()
+            last_loss = loss # last training loss for checkpoint saving.
             losses = []
             last_stop_checkpoint = dataloader.last_stop
             dataloader.last_stop = 0
@@ -284,6 +291,8 @@ for epoch in range(4):
             dataloader.last_stop = last_stop_checkpoint
             print(f'Eval loss average: {loss}')
             gpt.train()
+
+            save_ckpt(gpt, optim, epoch, i, round, last_loss, loss)
         
         x, y = dataloader.construct_batch(i, 'train')
         tokens, loss = gpt(x,y)
