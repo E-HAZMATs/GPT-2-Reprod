@@ -152,6 +152,24 @@ class GPT(nn.Module):
             idx = idx.view(B, T, 1) 
             tokens = indices.gather(-1, idx)
         return tokens, loss
+
+    # Initializes the optimizer with weight decay applied to params with dims > 1
+    def init_optim(self, lr=1e-3, weight_decay=1e-4):
+        decay_params = []
+        no_decay_params = []
+
+        for param in self.parameters():
+            if len(param.shape) > 1:
+                decay_params.append(param)
+            else:
+                no_decay_params.append(param)
+        
+        param_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': no_decay_params, 'weight_decay': 0}
+        ]
+        optim = torch.optim.AdamW(param_groups, lr)
+        return optim
 class DataLoader:
     '''
     TODO: train/eval sets? Need to find a good split ("good numbers").
@@ -169,8 +187,8 @@ class DataLoader:
         y_batch = []
         for j in range(batch_size):
             end = self.last_stop + self.context_window
-            x_batch.append(torch.tensor(self.data[self.last_stop: end], dtype=torch.int32))
-            y_batch.append(torch.tensor(self.data[self.last_stop+1: end+1], dtype=torch.long)) # F.cross_ent expects type long for targets
+            x_batch.append(self.data[self.last_stop: end].to(dtype=torch.int32))
+            y_batch.append(self.data[self.last_stop+1: end+1].to(dtype=torch.long)) # F.cross_ent expects type long for targets
             self.last_stop = end
         x = torch.stack(x_batch)
         y = torch.stack(y_batch)
@@ -179,20 +197,20 @@ class DataLoader:
 '''
 Some notes:
 
-- GPT, differs than the transformer.png. It's a decoder-only transformer.
-the LN is done I think before the attention adn FW instead of after shown in the diagram.
 - attn and FW are each a residual block. their output is added to residual pathway.
 
 '''
 
 # region ARGS - Objects
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 with open('input.txt', 'r') as f:
     text = f.read()
 
 tokenizer = tiktoken.get_encoding('gpt2')
 tokenized_data = tokenizer.encode(text)
 token_count = len(tokenized_data)
-data = np.array(tokenized_data, dtype=np.uint16) # Vocab 50k, dtype max ~ 60k
+data = torch.tensor(tokenized_data, dtype=torch.uint16).to(device) # Vocab 50k, dtype max ~ 60k
+
 del tokenized_data
 
 conf = GPTConfig()
@@ -202,6 +220,8 @@ batches_count = token_count // (batch_size * context_window + 1) # How many batc
 training = True
 iter = int(1e4)
 lr = 1e-3
+weight_decay = 1e-3
+eval_every = 2000
 # endregion
 
 # region dataloading test
@@ -216,25 +236,28 @@ dataloader = DataLoader(data, batch_size, context_window)
 - Try running multiple epochs. Each epoch have the dataset permuatated somehow?
 - apply warmup, lr decay.
 - Grad scaling? 
+TODO: Grad accumes
+TODO: Frequent evals. Checkpoint at each eval.
 '''
-# sequences = torch.randint(0, conf.vocab_size, (4, conf.seq_len - 3))
-# x, y = dataloader.construct_batch(0)
-gpt = GPT(conf)
+
+gpt = GPT(conf).to(device)
+optim = gpt.init_optim(lr, weight_decay)
 if not training:
     gpt.eval()
 # out = gpt(x, y)
 param_count = sum([p.numel() for p in gpt.parameters() if p.requires_grad])
 print(f'Param count: {param_count}')
-print(batches_count)
-optim = torch.optim.Adam(gpt.parameters(), lr)
+round = 0
 for epoch in range(4):
     dataloader.last_stop = 0
     for i in range(batches_count):
         x, y = dataloader.construct_batch(i)
         tokens, loss = gpt(x,y)
-        print(f'loss: {loss}')
+        print(f'#{round} - loss: {loss}')
         loss.backward()
         optim.step()
         optim.zero_grad()
+        round += 1
+
 
 # endregion
