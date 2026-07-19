@@ -130,18 +130,26 @@ class GPT(nn.Module):
 
         x = self.transformer.ln(x)
         logits = self.linear_final(x)
-        # If eval, we're only cconcerned with next token for last time step.
-        if not self.training:
+        # If inference, we're only cconcerned with next token for last time step.
+        if not self.training and y is None:
             # XXX: Should time step dim be dropped?
             logits = logits[:,[-1], :] # [-1] brackets preserve dim. 
             T = 1 # For shaping multinomial
-        if self.training and y is not None:
+        
+        loss = None
+        # 
+        # During eval, we have self.training = false. we want to measure loss for each timestep.
+        # So the determinant is wether we have targets or not.
+        # XXX: Check for silent but if i'm using truncated logits during eval.
+        if y is not None:
             # Pytoch CE expects logits not probas. 
             # And it expects them to be B C T instead of B T C.
+            assert T == x.size(1)
             loss = F.cross_entropy(logits.transpose(-1, -2), y)
+        
         tokens = None
-        if not self.training:
-            # Sampling logic not needed during training
+        if not self.training and y is None:
+            # Sampling logic not needed during training/eval
             
             # Softmax over last dim (vocab_size) to get the probas for next token for each token in vocab
             probas = F.softmax(logits, dim=-1)
@@ -174,21 +182,25 @@ class DataLoader:
     '''
     TODO: train/eval sets? Need to find a good split ("good numbers").
     '''
-    def __init__(self, data, batch_size, context_window):
+    def __init__(self, data, batch_size, context_window, data_split):
         self.context_window = context_window
         self.batch_size = batch_size
-        self.data = data
-        self.n = len(self.data)
+        self.n = len(data)
+        self.data = {
+            'train': data[: int(self.n * data_split)],
+            'eval': data[int(self.n * data_split):]
+        }
         self.last_stop = 0
         self.capacity = (self.n // self.context_window) - 1 
     
-    def construct_batch(self, i):
+    def construct_batch(self, i, type='train'):
+        assert type in ['train', 'eval'], f"Type of batch must be either train or eval. Type given: {type}."
         x_batch = []
         y_batch = []
         for j in range(batch_size):
             end = self.last_stop + self.context_window
-            x_batch.append(self.data[self.last_stop: end].to(dtype=torch.int32))
-            y_batch.append(self.data[self.last_stop+1: end+1].to(dtype=torch.long)) # F.cross_ent expects type long for targets
+            x_batch.append(self.data[type][self.last_stop: end].to(dtype=torch.int32))
+            y_batch.append(self.data[type][self.last_stop+1: end+1].to(dtype=torch.long)) # F.cross_ent expects type long for targets
             self.last_stop = end
         x = torch.stack(x_batch)
         y = torch.stack(y_batch)
@@ -215,17 +227,19 @@ del tokenized_data
 
 conf = GPTConfig()
 batch_size = 32
+data_split = 0.9
 context_window = conf.seq_len
-batches_count = token_count // (batch_size * context_window + 1) # How many batches per epoch. XXX: Some data loss probably happens, minor.
+batches_count_train = int(token_count * data_split) // (batch_size * context_window + 1) # How many batches per epoch. XXX: Some data loss probably happens, minor.
+batches_count_eval = (token_count - int(token_count * data_split)) // (batch_size * context_window + 1)
 training = True
 iter = int(1e4)
 lr = 1e-3
 weight_decay = 1e-3
-eval_every = 2000
+eval_every = 20
 # endregion
 
 # region dataloading test
-dataloader = DataLoader(data, batch_size, context_window)
+dataloader = DataLoader(data, batch_size, context_window, data_split)
 # for i in range(iter):
 #     dataloader.construct(i)
 # endregion
@@ -250,14 +264,42 @@ print(f'Param count: {param_count}')
 round = 0
 for epoch in range(4):
     dataloader.last_stop = 0
-    for i in range(batches_count):
-        x, y = dataloader.construct_batch(i)
+    for i in range(batches_count_train):
+
+        if round % eval_every == 0 and round != 0:
+            print('***EVALUATION***')
+            gpt.eval()
+            losses = []
+            last_stop_checkpoint = dataloader.last_stop
+            dataloader.last_stop = 0
+        
+            for j in range(batches_count_eval):
+                x, y = dataloader.construct_batch(j, 'eval')
+                with torch.no_grad():
+                   _, loss = gpt(x, y)
+                print(f"#{j} - Eval loss: {loss}")
+                losses.append(loss.item())
+
+            loss = sum(losses) / losses.__len__()
+            dataloader.last_stop = last_stop_checkpoint
+            print(f'Eval loss average: {loss}')
+            gpt.train()
+        
+        x, y = dataloader.construct_batch(i, 'train')
         tokens, loss = gpt(x,y)
-        print(f'#{round} - loss: {loss}')
+        if round % 10 == 0:
+            print(f'#{round} - train loss: {loss}')
         loss.backward()
         optim.step()
         optim.zero_grad()
         round += 1
-
+# TODO: Add one last eval after training ends?
 
 # endregion
+
+# Region Sampling/Generating
+# text = "Greetings, I'd like to have"
+# gpt(torch.tensor(tokenizer.encode(text)).unsqueeze(0))
+# def sample(text):
+#     gpt.eval()
+#     tokens = tokenizer.encode(text) # 8 TOKENS
