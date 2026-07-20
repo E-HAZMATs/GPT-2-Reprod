@@ -29,6 +29,7 @@ class SelfAttention(nn.Module):
         assert config.embedding_len % config.n_heads == 0
         self.qkv_lin = nn.Linear(config.embedding_len, config.embedding_len * 3)
         self.proj_lin = nn.Linear(config.embedding_len, config.embedding_len)
+        self.proj_lin.GPT2_INIT = True
 
         # TODO: Add stencil/mask here? better with register buffer so it's no grad
 
@@ -67,7 +68,7 @@ class FeedForward(nn.Module):
         self.lin1 = nn.Linear(config.embedding_len, config.embedding_len * 4)
         self.gelu = nn.GELU(approximate=g_approx)
         self.lin2 = nn.Linear(config.embedding_len * 4, config.embedding_len)
-
+        self.lin2.GPT2_INIT = True
     def forward(self, x):
         # DON'T FORGET ABOUT RES CONS.
         # in transformer diagram the output of this layer is added to residual pathway.
@@ -118,7 +119,31 @@ class GPT(nn.Module):
         # EMBEDDING AND OUTPUT LAYER WEIGHT TYING
         # Both weights have same shape btw.  
         self.transformer.embedding_table.weight = self.linear_final.weight
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            std = 0.02
+            if hasattr(module, 'GPT2_INIT'):
+                '''
+                GPT2 Paper scales down residual layers' (layer output added to res path) weights
+                
+                 "A modified initialization which accounts
+                for the accumulation on the residual path with model depth
+                is used. We scale the weights of residual layers at initial
+                ization by a factor of 1/√N where N is the number of
+                residual layers."
 
+                so last layers in attn and ffw.
+                '''
+                std *= (2 * self.config.n_blocks) ** -.5
+            torch.nn.init.normal_(module.weight, mean=0, std=std)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, std=0.02)
+        # print(f'initialized weights for model: {module._get_name()}')
+    
     # Recieves B sequences of T tokens. (B, T).
     def forward(self, x, y=None):
         '''
