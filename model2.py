@@ -4,19 +4,20 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 import tiktoken
 import numpy as np
-from helpers import save_ckpt
+from helpers import save_ckpt, load_ckpt, get_lr
+
 '''
 T0D0$
 TODO: Apply KV Cache?
-TODO: Add dropout regging later.
+TODO: Add  regging later.
 '''
 @dataclass
 class GPTConfig:
     seq_len: int = 64
-    embedding_len = 32
-    n_heads = 8
-    n_blocks = 12
-    vocab_size = 50257
+    embedding_len: int = 32
+    n_heads: int = 8
+    n_blocks: int = 12
+    vocab_size: int = 50257
 
 class SelfAttention(nn.Module):
     
@@ -31,7 +32,7 @@ class SelfAttention(nn.Module):
         self.proj_lin = nn.Linear(config.embedding_len, config.embedding_len)
         self.proj_lin.GPT2_INIT = True
 
-        # TODO: Add stencil/mask here? better with register buffer so it's no grad
+        # TODO: Add stencil/mask here? No need since using torch's attention.
 
     def forward(self, x):
         # rough steps: get QKV > matmul q with k > get mask > apply mask > softmax 
@@ -46,14 +47,9 @@ class SelfAttention(nn.Module):
         q = q.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2) # (B, n_heads, T, head_size). Before (B, T, C). 
         k = k.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2)
         v = v.view(B, T, self.n_heads, self.embedding_len // self.n_heads).transpose(1,2)
-        # (B, n_heads, T, head_size) @ (B, n_heads, head_size, T) = (B, n_heads, T, T)
-        wei = q @ k.transpose(-1, -2)
-        # XXX: Constant. Move to constructor?
-        tril = torch.tril(torch.ones(T,T))
-        wei = wei.masked_fill(tril == 0, float('-inf'))
-        # Each vector at last dim, should sum to 1.
-        affinity = F.softmax(wei, dim=-1)
-        attention = affinity  @ v
+
+        # Torch flash attention.
+        attention = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         # `contiguous` sorta applies the transposition in memory. Otherwise the `view` will fail
         attention = attention.transpose(1,2).contiguous().view(B,T,C)
         # This makes each head result PER TOKEN communicate/concat.
@@ -70,10 +66,6 @@ class FeedForward(nn.Module):
         self.lin2 = nn.Linear(config.embedding_len * 4, config.embedding_len)
         self.lin2.GPT2_INIT = True
     def forward(self, x):
-        # DON'T FORGET ABOUT RES CONS.
-        # in transformer diagram the output of this layer is added to residual pathway.
-        # but gpt does things different, so...?
-        # whole layer is a single residual block? so the addition is in the Atten+FeedFW block?
         x = self.lin1(x) # > (B, T, C * 4)
         x = self.gelu(x) # > (B, T, C * 4)
         x = self.lin2(x) # > (B,T,C)
@@ -103,7 +95,6 @@ class GPT(nn.Module):
     
     def __init__(self, config:GPTConfig):
         '''
-        TODO: Apply weight tying between output layer and embedding layer. Reduces params lots without ruining performance.
         '''
         super().__init__()
         self.config = config
@@ -255,24 +246,23 @@ data = torch.tensor(tokenized_data, dtype=torch.uint16).to(device) # Vocab 50k, 
 
 del tokenized_data
 
-conf = GPTConfig()
+conf = GPTConfig(vocab_size = 50304)
 batch_size = 32
 data_split = 0.9
 context_window = conf.seq_len
 batches_count_train = int(token_count * data_split) // (batch_size * context_window + 1) # How many batches per epoch. XXX: Some data loss probably happens, minor.
 batches_count_eval = (token_count - int(token_count * data_split)) // (batch_size * context_window + 1)
+epochs = 10
 training = True
 iter = int(1e4)
 lr = 1e-3
 weight_decay = 1e-3
 eval_every = 20
-warmup = 500
-# endregion
-
-# region dataloading test
-dataloader = DataLoader(data, batch_size, context_window, data_split)
-# for i in range(iter):
-#     dataloader.construct(i)
+warmup_steps = int((epochs * batches_count_train) * 0.15) # Warmup 15% of training run. Random num I picked :).
+max_steps = 1e99 # When do we stop lr decay? 
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+load_model = False # Load checkpoint?
 # endregion
 
 # region Training 
@@ -284,16 +274,18 @@ dataloader = DataLoader(data, batch_size, context_window, data_split)
 TODO: Grad accumes
 TODO: Frequent evals. Checkpoint at each eval.
 '''
-
+dataloader = DataLoader(data, batch_size, context_window, data_split)
 gpt = GPT(conf).to(device)
+# gpt = torch.compile(gpt) # Requires some C Compiler in PATH
 optim = gpt.init_optim(lr, weight_decay)
 if not training:
     gpt.eval()
-# out = gpt(x, y)
 param_count = sum([p.numel() for p in gpt.parameters() if p.requires_grad])
 print(f'Param count: {param_count}')
+
 round = 0
-for epoch in range(4):
+grad_clipped = 0 # How many times?
+for epoch in range(epochs):
     dataloader.last_stop = 0
     for i in range(batches_count_train):
 
@@ -324,9 +316,21 @@ for epoch in range(4):
         if round % 10 == 0:
             print(f'#{round} - train loss: {loss}')
         loss.backward()
+        # Gradient clipping if norm of grads exceed given threshold (1). 
+        norm = nn.utils.clip_grad_norm_(gpt.parameters(), 1)
+        if norm > 1:
+            grad_clipped += 1
+            # print(f'{grad_clipped} Grads clipped . Pre clip norm = {norm:.2f}')
+
+        # Alpha warmup & decay. 
+        lr = get_lr(round, max_steps, warmup_steps, max_lr, min_lr)
+        for param_group in optim.param_groups:
+            param_group['lr'] = lr
+
         optim.step()
         optim.zero_grad()
         round += 1
+
 # TODO: Add one last eval after training ends?
 
 # endregion

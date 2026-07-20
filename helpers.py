@@ -1,4 +1,5 @@
 import torch
+import math
 '''
 TODO?: checkpoint last model and best model?
 '''
@@ -28,5 +29,16 @@ def load_ckpt(model, optim):
         total_iter = checkpoint['total_iter']
         )
 
-
-# load_ckpt
+# Applies learning rate warmup and decay.
+def get_lr(iter, max_steps, warmup_steps, max_lr, min_lr):
+    # warmup. start near 0 keep increasing.
+    if iter < warmup_steps:
+        return max_lr * (iter+1) / warmup_steps
+    # No more decay
+    elif iter > max_steps:
+        return min_lr
+    # given formula. works I guess.
+    decay_ratio = (iter - warmup_steps) / (max_steps - warmup_steps)
+    assert 0 <= decay_ratio <= 1
+    coeff = 0.5 * (1 + math.cos(math.pi * decay_ratio))
+    return min_lr + coeff * (max_lr - min_lr)
