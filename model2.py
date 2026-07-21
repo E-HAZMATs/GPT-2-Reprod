@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import tiktoken
 import numpy as np
 from helpers import save_ckpt, load_ckpt, get_lr
-
+from time import time
 '''
 T0D0$
 TODO: Apply KV Cache?
@@ -13,11 +13,12 @@ TODO: Add  regging later.
 '''
 @dataclass
 class GPTConfig:
-    seq_len: int = 64
-    embedding_len: int = 32
-    n_heads: int = 8
+    seq_len: int = 128
+    embedding_len: int = 768
+    n_heads: int = 12
     n_blocks: int = 12
     vocab_size: int = 50257
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 class SelfAttention(nn.Module):
     
@@ -98,7 +99,7 @@ class GPT(nn.Module):
         '''
         super().__init__()
         self.config = config
-        self.top_picks = 25 # Arg for torch.topk
+        self.top_picks = 30 # Arg for torch.topk
         self.transformer = nn.ModuleDict(dict(
             embedding_table = nn.Embedding(config.vocab_size, config.embedding_len),
             positional_embedding = nn.Embedding(config.seq_len, config.embedding_len),
@@ -143,7 +144,7 @@ class GPT(nn.Module):
         B, T= x.size()
         assert T <= self.config.seq_len, f'sequence length should not exceed {self.config.seq_len}' # XXX: Should ==? otherwise mismatch with linear
         token_embeddings = self.transformer.embedding_table(x) # (B, T, C)
-        positions = torch.arange(0, T) # Should use actual T sequence length from input instead of config. Otherwise, boarding in addition fails.
+        positions = torch.arange(0, T).to(self.config.device) # Should use actual T sequence length from input instead of config. Otherwise, boarding in addition fails.
         pos_embeddings = self.transformer.positional_embedding(positions) # (seq_len)
         x = token_embeddings + pos_embeddings
         for block in self.transformer.blocks:
@@ -229,13 +230,34 @@ class DataLoader:
     
 '''
 Some notes:
-
-- attn and FW are each a residual block. their output is added to residual pathway.
-
+...
 '''
 
+def eval(loss):
+        print('***EVALUATION***')
+        gpt.eval()
+        last_loss = loss # last training loss for checkpoint saving.
+        losses = []
+        last_stop_checkpoint = dataloader.last_stop
+        dataloader.last_stop = 0
+    
+        for j in range(batches_count_eval):
+            x, y = dataloader.construct_batch(j, 'eval')
+            with torch.no_grad():
+                _, loss = gpt(x, y)
+            print(f"#{j} - Eval loss: {loss}")
+            losses.append(loss.item())
+
+        loss = sum(losses) / losses.__len__()
+        dataloader.last_stop = last_stop_checkpoint
+        print(f'Eval loss average: {loss}')
+        gpt.train()
+
+        save_ckpt(gpt, optim, epoch, i, round, last_loss, loss)
+
 # region ARGS - Objects
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+conf = GPTConfig()
+device = conf.device
 with open('input.txt', 'r') as f:
     text = f.read()
 
@@ -252,12 +274,12 @@ data_split = 0.9
 context_window = conf.seq_len
 batches_count_train = int(token_count * data_split) // (batch_size * context_window + 1) # How many batches per epoch. XXX: Some data loss probably happens, minor.
 batches_count_eval = (token_count - int(token_count * data_split)) // (batch_size * context_window + 1)
-epochs = 10
 training = True
 iter = int(1e4)
 lr = 1e-3
 weight_decay = 1e-3
-eval_every = 20
+eval_every = 100
+epochs = 200
 warmup_steps = int((epochs * batches_count_train) * 0.15) # Warmup 15% of training run. Random num I picked :).
 max_steps = 1e99 # When do we stop lr decay? 
 max_lr = 6e-4
@@ -285,31 +307,14 @@ print(f'Param count: {param_count}')
 
 round = 0
 grad_clipped = 0 # How many times?
+t1 = time()
+loss = None
 for epoch in range(epochs):
     dataloader.last_stop = 0
     for i in range(batches_count_train):
 
         if round % eval_every == 0 and round != 0:
-            print('***EVALUATION***')
-            gpt.eval()
-            last_loss = loss # last training loss for checkpoint saving.
-            losses = []
-            last_stop_checkpoint = dataloader.last_stop
-            dataloader.last_stop = 0
-        
-            for j in range(batches_count_eval):
-                x, y = dataloader.construct_batch(j, 'eval')
-                with torch.no_grad():
-                   _, loss = gpt(x, y)
-                print(f"#{j} - Eval loss: {loss}")
-                losses.append(loss.item())
-
-            loss = sum(losses) / losses.__len__()
-            dataloader.last_stop = last_stop_checkpoint
-            print(f'Eval loss average: {loss}')
-            gpt.train()
-
-            save_ckpt(gpt, optim, epoch, i, round, last_loss, loss)
+            eval(loss)
         
         x, y = dataloader.construct_batch(i, 'train')
         tokens, loss = gpt(x,y)
@@ -332,7 +337,7 @@ for epoch in range(epochs):
         round += 1
 
 # TODO: Add one last eval after training ends?
-
+print(f'Training took: {(time() - t1) / 60} minutes.')
 # endregion
 
 # Region Sampling/Generating
